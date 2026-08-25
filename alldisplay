@@ -1,0 +1,99 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// --- Pinos do Display OLED ---
+#define SDA_PIN 18
+#define SCL_PIN 19
+
+// --- Pinos do Leitor RFID ---
+#define SS_PIN   0
+#define RST_PIN  4
+#define SCK_PIN  1
+#define MISO_PIN 3
+#define MOSI_PIN 2
+
+// Instâncias
+Adafruit_SSD1306 display(128, 32, &Wire, -1);
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // 1. Inicializa o Display OLED
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("ERRO OLED");
+    while (1);
+  }
+  
+  display.cp437(true);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  // 2. Inicializa o Leitor RFID
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
+  rfid.PCD_Init();
+  delay(100);
+
+  // 3. Mostra a mensagem inicial na tela
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Aproxime um cartao...");
+  display.display();
+  
+  Serial.println("Sistema pronto!");
+}
+
+void loop() {
+  // Verifica se existe um novo cartão (se não, repete o loop)
+  if (!rfid.PICC_IsNewCardPresent()) {
+    delay(50);
+    return;
+  }
+
+  // Tenta ler os dados do cartão
+  if (!rfid.PICC_ReadCardSerial()) {
+    return;
+  }
+
+  // Captura o UID e transforma em uma String
+  String uidString = "";
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    if (rfid.uid.uidByte[i] < 0x10) uidString += "0"; // Adiciona zero à esquerda se for menor que 16
+    uidString += String(rfid.uid.uidByte[i], HEX);
+    if (i < rfid.uid.size - 1) uidString += ":";
+  }
+  uidString.toUpperCase(); // Deixa tudo em maiúsculo para ficar mais bonito na tela
+
+  // Imprime no Monitor Serial
+  Serial.print("Cartao detectado UID: ");
+  Serial.println(uidString);
+
+  // Exibe no Display OLED
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Cartao lido:");
+  
+  // Exibe o UID na linha de baixo
+  display.setCursor(0, 16); 
+  display.println(uidString);
+  display.display();
+
+  // Encerra comunicação com o cartão lido
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  // Mantém a informação do cartão na tela por 2 segundos
+  delay(2000); 
+  
+  // Limpa e volta para a tela inicial
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Aproxime um cartao...");
+  display.display();
+}
