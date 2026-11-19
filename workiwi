@@ -1,0 +1,606 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// CONFIGURACAO WIFI
+const char* WIFI_SSID = "Wokwi-GUEST";
+const char* WIFI_PASS = "";
+
+// CONFIGURACAO MQTT
+const char* MQTT_SERVER = "broker.mqtt.cool";
+const int MQTT_PORT = 1883;
+
+const char* MQTT_ROOT = "esp32c3/victor";
+
+String TOPIC_TELEMETRY = String(MQTT_ROOT) + "/telemetry";
+
+WiFiClient espClient;
+PubSubClient mqtt(espClient);
+
+// PINOS
+#define SW1_PIN 6
+#define SW2_PIN 5
+
+#define OLED_SDA 18
+#define OLED_SCL 19
+
+// OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+// JOGADAS
+enum Jogada {
+  PEDRA,
+  PAPEL,
+  TESOURA
+};
+
+// ESTADOS DO JOGO
+enum EstadoJogo {
+  JOGADOR1,
+  JOGADOR2,
+  RESULTADO,
+  FINALIZADO
+};
+
+EstadoJogo estado = JOGADOR1;
+
+// VARIAVEIS DO JOGO
+Jogada jogadaSelecionada = PEDRA;
+Jogada jogada1 = PEDRA;
+Jogada jogada2 = PEDRA;
+
+int pontos1 = 0;
+int pontos2 = 0;
+
+int rodada = 1;
+
+String resultadoRodada = "Aguardando";
+String vencedorPartida = "";
+
+unsigned long tempoResultado = 0;
+
+const unsigned long TEMPO_RESULTADO = 3000;
+
+// SWITCHES
+int sw1Reading = HIGH;
+int sw2Reading = HIGH;
+
+int sw1Stable = HIGH;
+int sw2Stable = HIGH;
+
+unsigned long sw1DebounceTime = 0;
+unsigned long sw2DebounceTime = 0;
+
+const unsigned long DEBOUNCE_TIME = 50;
+
+// CONVERTE JOGADA EM STRING
+String nomeJogada(Jogada jogada) {
+
+  switch (jogada) {
+
+    case PEDRA:
+      return "Pedra";
+
+    case PAPEL:
+      return "Papel";
+
+    case TESOURA:
+      return "Tesoura";
+  }
+
+  return "Invalida";
+}
+
+// ESCREVE UMA LINHA NO OLED
+void exibir(int y, String texto) {
+
+  display.setCursor(0, y);
+  display.println(texto);
+}
+
+// EXIBE INFORMACOES DO JOGO
+void mostrarJogo() {
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  switch (estado) {
+
+    case JOGADOR1:
+
+      exibir(0, "PEDRA PAPEL TESOURA");
+      exibir(10, "Rodada: " + String(rodada) + "/5");
+      exibir(20, "Vez: Jogador 1");
+      exibir(30, "Escolha: " + nomeJogada(jogadaSelecionada));
+      exibir(40, "SW1: Proxima jogada");
+      exibir(50, "SW2: Confirmar");
+
+      break;
+
+    case JOGADOR2:
+
+      exibir(0, "PEDRA PAPEL TESOURA");
+      exibir(10, "Rodada: " + String(rodada) + "/5");
+      exibir(20, "Vez: Jogador 2");
+      exibir(30, "Escolha: " + nomeJogada(jogadaSelecionada));
+      exibir(40, "Jogada P1: OCULTA");
+      exibir(50, "SW2: Confirmar");
+
+      break;
+
+    case RESULTADO:
+
+      exibir(0, "RESULTADO RODADA " + String(rodada));
+      exibir(10, "P1: " + nomeJogada(jogada1));
+      exibir(20, "P2: " + nomeJogada(jogada2));
+      exibir(30, resultadoRodada);
+      exibir(40, "P1: " + String(pontos1) + " P2: " + String(pontos2));
+      exibir(50, "Aguarde...");
+
+      break;
+
+    case FINALIZADO:
+
+      exibir(0, "PARTIDA FINALIZADA");
+      exibir(10, "P1: " + String(pontos1));
+      exibir(20, "P2: " + String(pontos2));
+      exibir(30, "Vencedor:");
+      exibir(40, vencedorPartida);
+      exibir(50, "SW2: Nova partida");
+
+      break;
+  }
+
+  display.display();
+}
+
+// CONEXAO WIFI
+void connectWiFi() {
+
+  Serial.print("Conectando ao WiFi");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi conectado!");
+
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ENVIA TELEMETRIA MQTT
+void publishTelemetry() {
+
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  JsonDocument doc;
+
+  String jogadorAtual;
+  String jogada1Painel;
+  String jogada2Painel;
+
+  if (estado == JOGADOR1) {
+    jogadorAtual = "Jogador 1";
+  }
+  else if (estado == JOGADOR2) {
+    jogadorAtual = "Jogador 2";
+  }
+  else if (estado == RESULTADO) {
+    jogadorAtual = "Resultado";
+  }
+  else {
+    jogadorAtual = "Nenhum";
+  }
+
+  // OCULTA A JOGADA DO JOGADOR 1
+  if (estado == JOGADOR2) {
+    jogada1Painel = "Oculta";
+  }
+  else if (estado == RESULTADO || estado == FINALIZADO) {
+    jogada1Painel = nomeJogada(jogada1);
+  }
+  else {
+    jogada1Painel = "Aguardando";
+  }
+
+  if (estado == RESULTADO || estado == FINALIZADO) {
+    jogada2Painel = nomeJogada(jogada2);
+  }
+  else {
+    jogada2Painel = "Aguardando";
+  }
+
+  doc["jogador_atual"] = jogadorAtual;
+  doc["rodada"] = rodada;
+
+  doc["jogada_selecionada"] =
+    (estado == JOGADOR1 || estado == JOGADOR2)
+    ? nomeJogada(jogadaSelecionada)
+    : "";
+
+  doc["jogada_jogador1"] = jogada1Painel;
+  doc["jogada_jogador2"] = jogada2Painel;
+
+  doc["resultado"] = resultadoRodada;
+
+  doc["pontos1"] = pontos1;
+  doc["pontos2"] = pontos2;
+
+  doc["situacao"] =
+    estado == FINALIZADO ? "Finalizada" : "Em andamento";
+
+  doc["vencedor"] = vencedorPartida;
+
+  char buffer[512];
+
+  serializeJson(doc, buffer, sizeof(buffer));
+
+  mqtt.publish(
+    TOPIC_TELEMETRY.c_str(),
+    buffer,
+    true
+  );
+
+  Serial.print("Telemetry: ");
+  Serial.println(buffer);
+}
+
+// CONEXAO MQTT
+void connectMQTT() {
+
+  while (!mqtt.connected()) {
+
+    Serial.print("Conectando MQTT...");
+
+    String clientId = "ESP32C3-";
+
+    clientId += String(
+      (uint32_t)ESP.getEfuseMac(),
+      HEX
+    );
+
+    if (mqtt.connect(clientId.c_str())) {
+
+      Serial.println(" conectado!");
+
+      mqtt.publish(
+        TOPIC_TELEMETRY.c_str(),
+        "{\"situacao\":\"Conectando jogo\"}",
+        false
+      );
+
+      publishTelemetry();
+      mostrarJogo();
+
+    } else {
+
+      Serial.print(" falhou. Estado: ");
+      Serial.println(mqtt.state());
+
+      delay(3000);
+    }
+  }
+}
+
+// AVANCA PARA A PROXIMA JOGADA
+void avancarJogada() {
+
+  if (estado != JOGADOR1 && estado != JOGADOR2) {
+    return;
+  }
+
+  jogadaSelecionada =
+    static_cast<Jogada>((jogadaSelecionada + 1) % 3);
+
+  Serial.print("Jogada selecionada: ");
+  Serial.println(nomeJogada(jogadaSelecionada));
+
+  mostrarJogo();
+  publishTelemetry();
+}
+
+// LEITURA DOS SWITCHES COM DEBOUNCE
+void readSwitches() {
+
+  int leituraSW1 = digitalRead(SW1_PIN);
+
+  if (leituraSW1 != sw1Reading) {
+
+    sw1Reading = leituraSW1;
+    sw1DebounceTime = millis();
+  }
+
+  if (
+    millis() - sw1DebounceTime > DEBOUNCE_TIME &&
+    sw1Stable != sw1Reading
+  ) {
+
+    sw1Stable = sw1Reading;
+
+    // AVANCA SOMENTE QUANDO O BOTAO E PRESSIONADO
+    if (sw1Stable == LOW) {
+      avancarJogada();
+    }
+  }
+
+  int leituraSW2 = digitalRead(SW2_PIN);
+
+  if (leituraSW2 != sw2Reading) {
+
+    sw2Reading = leituraSW2;
+    sw2DebounceTime = millis();
+  }
+
+  if (
+    millis() - sw2DebounceTime > DEBOUNCE_TIME &&
+    sw2Stable != sw2Reading
+  ) {
+
+    sw2Stable = sw2Reading;
+
+    // BOTAO PRESSIONADO
+    if (sw2Stable == LOW) {
+
+      confirmarJogada();
+    }
+  }
+}
+
+// CONFIRMA JOGADA
+void confirmarJogada() {
+
+  // JOGADOR 1
+  if (estado == JOGADOR1) {
+
+    jogada1 = jogadaSelecionada;
+
+    estado = JOGADOR2;
+
+    jogadaSelecionada = PEDRA;
+
+    resultadoRodada = "Aguardando P2";
+
+    Serial.println("Jogador 1 confirmou!");
+
+    mostrarJogo();
+    publishTelemetry();
+  }
+
+  // JOGADOR 2
+  else if (estado == JOGADOR2) {
+
+    jogada2 = jogadaSelecionada;
+
+    Serial.println("Jogador 2 confirmou!");
+
+    calcularResultado();
+
+    estado = RESULTADO;
+
+    tempoResultado = millis();
+
+    mostrarJogo();
+    publishTelemetry();
+  }
+
+  // NOVA PARTIDA
+  else if (estado == FINALIZADO) {
+
+    iniciarPartida();
+  }
+}
+
+// COMPARA AS JOGADAS
+void calcularResultado() {
+
+  if (jogada1 == jogada2) {
+
+    resultadoRodada = "Empate";
+  }
+
+  else if (
+
+    (jogada1 == PEDRA && jogada2 == TESOURA) ||
+
+    (jogada1 == PAPEL && jogada2 == PEDRA) ||
+
+    (jogada1 == TESOURA && jogada2 == PAPEL)
+  ) {
+
+    resultadoRodada = "Jogador 1 venceu";
+
+    pontos1++;
+  }
+
+  else {
+
+    resultadoRodada = "Jogador 2 venceu";
+
+    pontos2++;
+  }
+
+  Serial.println("Resultado: " + resultadoRodada);
+
+  Serial.print("Placar: ");
+  Serial.print(pontos1);
+  Serial.print(" x ");
+  Serial.println(pontos2);
+}
+
+// PROCESSA O ENCERRAMENTO DA RODADA
+void processarJogo() {
+
+  if (estado != RESULTADO) {
+    return;
+  }
+
+  if (millis() - tempoResultado < TEMPO_RESULTADO) {
+    return;
+  }
+
+  // VERIFICA SE A PARTIDA TERMINOU
+  if (pontos1 >= 3 || pontos2 >= 3 || rodada >= 5) {
+
+    finalizarPartida();
+
+  } else {
+
+    rodada++;
+
+    jogada1 = PEDRA;
+    jogada2 = PEDRA;
+
+    jogadaSelecionada = PEDRA;
+
+    estado = JOGADOR1;
+
+    resultadoRodada = "Aguardando";
+
+    mostrarJogo();
+    publishTelemetry();
+  }
+}
+
+// FINALIZA PARTIDA
+void finalizarPartida() {
+
+  estado = FINALIZADO;
+
+  if (pontos1 > pontos2) {
+
+    vencedorPartida = "Jogador 1";
+  }
+
+  else if (pontos2 > pontos1) {
+
+    vencedorPartida = "Jogador 2";
+  }
+
+  else {
+
+    vencedorPartida = "Empate";
+  }
+
+  Serial.println("PARTIDA FINALIZADA!");
+
+  Serial.print("Vencedor: ");
+  Serial.println(vencedorPartida);
+
+  mostrarJogo();
+  publishTelemetry();
+}
+
+// INICIA NOVA PARTIDA
+void iniciarPartida() {
+
+  pontos1 = 0;
+  pontos2 = 0;
+
+  rodada = 1;
+
+  jogada1 = PEDRA;
+  jogada2 = PEDRA;
+
+  jogadaSelecionada = PEDRA;
+
+  resultadoRodada = "Aguardando";
+
+  vencedorPartida = "";
+
+  estado = JOGADOR1;
+
+  mostrarJogo();
+  publishTelemetry();
+
+  Serial.println("Nova partida iniciada!");
+}
+
+// SETUP
+void setup() {
+
+  Serial.begin(115200);
+
+  // SWITCHES
+  pinMode(SW1_PIN, INPUT_PULLUP);
+  pinMode(SW2_PIN, INPUT_PULLUP);
+
+  sw1Reading = digitalRead(SW1_PIN);
+  sw2Reading = digitalRead(SW2_PIN);
+
+  sw1Stable = sw1Reading;
+  sw2Stable = sw2Reading;
+
+  // OLED
+  Wire.begin(OLED_SDA, OLED_SCL);
+
+  if (!display.begin(
+    SSD1306_SWITCHCAPVCC,
+    OLED_ADDR
+  )) {
+
+    Serial.println("Erro OLED!");
+
+    while (true) {
+      delay(100);
+    }
+  }
+
+  // INICIA DISPLAY
+  mostrarJogo();
+
+  // INICIA PARTIDA
+  iniciarPartida();
+
+  // WIFI
+  connectWiFi();
+
+  // MQTT
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setBufferSize(512);
+
+  connectMQTT();
+
+  Serial.println("Sistema iniciado!");
+}
+
+// LOOP
+void loop() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
+
+  mqtt.loop();
+
+  readSwitches();
+
+  processarJogo();
+
+  delay(5);
+}
