@@ -1,0 +1,122 @@
+
+import json
+import paho.mqtt.client as mqtt
+
+# CONFIGURACAO MQTT
+MQTT_SERVER = "broker.mqtt.cool"
+MQTT_PORT = 1883
+
+MQTT_ROOT = "esp32c3/victor"
+
+TOPIC_TELEMETRY = f"{MQTT_ROOT}/telemetry"
+
+CLIENT_ID = "PYTHON_PEDRA_PAPEL_TESOURA"
+
+# CONEXAO MQTT
+def on_connect(client, userdata, flags, reason_code, properties):
+
+    if reason_code == 0:
+
+        print("[MQTT] Conectado ao broker!")
+
+        client.subscribe(TOPIC_TELEMETRY)
+
+        print(f"[MQTT] Inscrito em: {TOPIC_TELEMETRY}")
+
+    else:
+
+        print(f"[MQTT] Falha na conexao: {reason_code}")
+
+
+# DESCONECTAR MQTT
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+
+    print(f"[MQTT] Desconectado: {reason_code}")
+
+
+# RECEBER DADOS DO ESP32
+def on_message(client, userdata, msg):
+
+    try:
+
+        payload = json.loads(msg.payload.decode("utf-8"))
+
+    except (json.JSONDecodeError, UnicodeDecodeError):
+
+        print("[ERRO] Mensagem recebida invalida!")
+        return
+
+    print("\n" + "=" * 45)
+    print("       PEDRA, PAPEL E TESOURA")
+    print("=" * 45)
+
+    print(f"Rodada: {payload.get('rodada')}/5")
+
+    print(f"Jogador atual: {payload.get('jogador_atual')}")
+
+    print(f"Jogada selecionada: {payload.get('jogada_selecionada')}")
+
+    print("\n--- JOGADAS ---")
+
+    print(f"Jogador 1: {payload.get('jogada_jogador1')}")
+
+    print(f"Jogador 2: {payload.get('jogada_jogador2')}")
+
+    print("\n--- PLACAR ---")
+
+    print(f"Jogador 1: {payload.get('pontos1')} pontos")
+
+    print(f"Jogador 2: {payload.get('pontos2')} pontos")
+
+    print(f"\nResultado: {payload.get('resultado')}")
+
+    print(f"Situacao: {payload.get('situacao')}")
+
+    if payload.get("situacao") == "Finalizada":
+
+        print("\n" + "*" * 45)
+        print(f"VENCEDOR DA PARTIDA: {payload.get('vencedor')}")
+        print("*" * 45)
+
+    print("=" * 45)
+
+
+# CRIAR CLIENTE MQTT
+client = mqtt.Client(
+    callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+    client_id=CLIENT_ID
+)
+
+client.on_connect = on_connect
+client.on_disconnect = on_disconnect
+client.on_message = on_message
+
+
+# EXECUCAO PRINCIPAL
+try:
+
+    print("[MQTT] Conectando ao broker...")
+
+    client.connect(
+        MQTT_SERVER,
+        MQTT_PORT,
+        keepalive=60
+    )
+
+    print("[MQTT] Aguardando dados do ESP32-C3...")
+
+    client.loop_forever()
+
+except KeyboardInterrupt:
+
+    print("\n[MQTT] Programa encerrado pelo usuario.")
+
+except Exception as e:
+
+    print(f"[ERRO] {e}")
+
+finally:
+
+    client.disconnect()
+
+    print("[MQTT] Cliente finalizado.")
